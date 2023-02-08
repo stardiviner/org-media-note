@@ -217,7 +217,7 @@ group 4: description tag")
 
 (defun org-media-note--online-video-p (path)
   "Return t if PATH is an HTTP URL."
-  (string-match "^http" path))
+  (string-match "^http" (if (stringp path) path "")))
 
 ;;;;; Add note
 ;;;;;; media note item
@@ -277,6 +277,7 @@ group 4: description tag")
         (pos (mpv-get-playback-position)))
     (and (numberp time-a)
          (numberp time-b)
+         (numberp pos)
          (<= time-a pos)
          (<= pos time-b))))
 
@@ -446,6 +447,7 @@ Pass ARGS to ORIG-FN, `org-insert-item'."
 (defun org-media-note--format-file-path (path)
   "Convert PATH into the format defined by `org-link-file-path-type'."
   (cond
+   ((not (stringp path)) "")
    ((eq org-link-file-path-type 'absolute)
     (abbreviate-file-name (expand-file-name path)))
    ((eq org-link-file-path-type 'noabbrev)
