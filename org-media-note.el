@@ -99,10 +99,10 @@
    "Note"
    (("i" org-media-note-insert-link "Insert timestamp/loop")
     ("a" org-media-note-adjust-timestamp-offset "Adjust timestamp")
-    ("S" org-media-note-insert-screenshot "Insert Screenshot")
-    ("s" org-media-note-insert-sub-text "Insert subtitle")
+    ("s" org-media-note-insert-screenshot "Insert Screenshot")
+    ("S" org-media-note-insert-sub-text "Insert subtitle")
     ("H-m" org-media-note-merge-item "Merge items")
-    ("C"
+    ("c"
      (if (org-media-note--ab-loop-p)
          (let* ((time-a (mpv-get-property "ab-loop-a"))
                 (time-b (mpv-get-property "ab-loop-b"))
