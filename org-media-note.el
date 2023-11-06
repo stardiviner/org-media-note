@@ -52,10 +52,10 @@
     ("T"
      (mpv-cycle-property "ontop")
      "toggle ontop")
-    ("c"
+    ("]"
      (org-media-note-change-speed-by 0.1)
      "increase speed")
-    ("x"
+    ("["
      (org-media-note-change-speed-by -0.1)
      "decrease speed")
     ("z" org-media-note-mpv-toggle-speed "reset speed"))
