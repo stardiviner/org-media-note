@@ -8,9 +8,17 @@
 (require 'ffmpeg-utils)
 (require 'org)
 
-(declare-function org-timer-secs-to-hms "org-timer")
-(declare-function org-timer-hms-to-secs "org-timer")
+(require 'cl-lib)
+
+(declare-function org-element-context "org-element" (&optional element))
+(declare-function org-element-property "org-element-ast" (property node &optional dflt force-undefer))
+(declare-function org-element-type "org-element-ast" (node &optional anonymous))
+(declare-function org-timer-secs-to-hms "org-timer" (s))
+(declare-function org-timer-hms-to-secs "org-timer" (hms))
 (declare-function org-attach-dir "org-attach")
+
+(declare-function org-media-note-get-media-file-by-key "org-media-note-org-ref" (key))
+(declare-function org-media-note-get-url-by-key "org-media-note-org-ref" (key))
 
 ;;;; Customization
 
@@ -20,20 +28,22 @@
   :prefix "org-media-note-")
 
 (defcustom org-media-note-use-org-ref nil
-  "Whether to use org-ref together with org-media-note."
+  "Whether to use `org-ref' together with org-media-note."
   :type 'boolean)
 
 (defcustom org-media-note-auto-insert-item t
-  "Control whether to automatically insert media items in org-media-note-mode."
+  "Control whether to automatically insert media items in `org-media-note-mode'."
   :type 'boolean)
 
 (defcustom org-media-note-screenshot-save-method 'directory
   "The way images should be stored.
 1. directory: save to `org-media-note-screenshot-image-dir'
-2. attach: save to corresponding org-attach-dir."
-  :type '(choice
-          (const :tag "Directory" directory)
-          (const :tag "Attachment" attach)))
+2. attach: save to corresponding `org-attach-dir'.
+3. custom function: save to dir returned by function,
+accept two arguments: media-path, media-title."
+  :type '(choice (const :tag "Directory" directory)
+          (const :tag "Attachment" attach)
+          (function :tag "Custom function")))
 
 (defcustom org-media-note-screenshot-link-type-when-save-in-attach-dir 'file
   "Link type to use with the `attach` `org-media-note-screenshot-save-method'.
@@ -43,8 +53,29 @@ File links are more general, while attachment links are more concise."
           (const :tag "attachment:" attach)))
 
 (defcustom org-media-note-screenshot-image-dir org-directory
-  "Default dir to save screenshots when `org-media-note-screenshot-save-method' is set to directory."
+  "Default dir to save screenshots.
+Only valid when `org-media-note-screenshot-save-method' is set to directory."
   :type 'string)
+
+(defcustom org-media-note-screenshot-extension ".jpg"
+  "File extension for screenshots taken with org-media-note.
+Should be consistent with `screenshot-format' in MPV."
+  :type 'string)
+
+(defcustom org-media-note--screenshot-name-format-function
+  'org-media-note--screenshot-name-format-function-default
+  "Function to format screenshot names in org-media-note."
+  :type 'function)
+
+(defcustom org-media-note-select-function
+  (cond
+   ((fboundp 'ido-completing-read) 'ido-completing-read)
+   (t 'completing-read))
+  "Function to use for selection in org-media-note."
+  :type '(choice
+          (const :tag "ido-completing-read" ido-completing-read)
+          (const :tag "completing-read" completing-read))
+  )
 
 (defcustom org-media-note-save-screenshot-p nil
   "Whether to auto save screenshot when insert media link."
@@ -68,18 +99,22 @@ File links are more general, while attachment links are more concise."
   )
 
 (defcustom org-media-note-separator-when-merge ""
-  "Separator to use when calling  `org-media-note-merge-item'"
+  "Separator to use when calling  `org-media-note-merge-item'."
   :type 'string)
 
 
 (defcustom org-media-note-timestamp-pattern 'hms
-  ""
+  "Format pattern for timestamps in org-media-note.
+Allows the following substitutions:
+- `hms`: Hours, minutes, and seconds (hh:mm:ss).
+- `hmsf`: Hours, minutes, seconds, and milliseconds (hh:mm:ss.fff)."
   :type '(choice
           (const :tag "hh:mm:ss" hms)
           (const :tag "hh:mm:ss.fff" hmsf)))
 
 (defcustom org-media-note-timestamp-link-format "%timestamp"
-  "Timestamp Link text.  Allows the following substitutions:
+  "Timestamp Link text.
+Allows the following substitutions:
 - %filename :: name of the media file
 - %timestamp :: current media timestamp (hms)
 - %duration :: length of the media file (hms)
@@ -87,7 +122,8 @@ File links are more general, while attachment links are more concise."
   :type 'string)
 
 (defcustom org-media-note-ab-loop-link-format "%ab-loop-a-%ab-loop-b"
-  "AB-loop Link text.  Allows the following substitutions:
+  "AB-loop Link text.
+Allows the following substitutions:
 - %filename :: name of the media file
 - %ab-loop-a :: timestamp of point a of ab loop (hms)
 - %ab-loop-b :: timestamp of point b of ab loop (hms)
@@ -101,7 +137,7 @@ File links are more general, while attachment links are more concise."
   :options '(before after))
 
 (defcustom org-media-note-ref-key-field "Custom_ID"
-  "The property to save org-ref key."
+  "The property to save `org-ref' key."
   :type 'string)
 
 (defcustom org-media-note-link-prefix ""
@@ -112,7 +148,6 @@ This is useful when `org-media-note-cursor-start-position' is set to`before`."
 
 (defcustom org-media-note-use-inheritance t
   "Ref key inheritance for the outline."
-  :group 'org-media-note
   :type '(choice
 	  (const :tag "Don't use inheritance" nil)
 	  (const :tag "Inherit parent node ref key" t)))
@@ -138,11 +173,20 @@ group 4: description tag")
 ;;;; Commands
 ;;;;; Utils
 
+(defun org-media-note--select (prompt choices)
+  "PROMPT the user to select from CHOICES using `org-media-note-select-function'."
+  (pcase org-media-note-select-function
+    ('ido-completing-read
+     (ido-completing-read (format "%s: " prompt) choices))
+    (_
+     (completing-read (format "%s: " prompt) choices))))
+
 (defun org-media-note--seconds-to-timestamp (secs)
-  "Convert SECS (float or int) to timestamp according to `org-media-note-timestamp-pattern'."
+  "Convert SECS (float or int) to timestamp.
+according to `org-media-note-timestamp-pattern'."
   (let ((secs (if (stringp secs)
-                     (string-to-number secs)
-                   secs)))
+                  (string-to-number secs)
+                secs)))
     (cond
      ((eq org-media-note-timestamp-pattern 'hms)
       (org-media-note--seconds-to-hms secs))
@@ -150,11 +194,11 @@ group 4: description tag")
       (org-media-note--seconds-to-hmsf secs)))))
 
 (defun org-media-note--seconds-to-hms (secs)
-  "Convert SECS (float or int) to 'hh:mm:ss'."
+  "Convert SECS (float or int) to hh:mm:ss."
   (org-timer-secs-to-hms (round secs)))
 
 (defun org-media-note--seconds-to-hmsf (secs)
-  "Convert SECS (float or int) to 'hh:mm:ss.fff'."
+  "Convert SECS (float or int) to hh:mm:ss.fff."
   (let* ((sec-with-ms (split-string (format "%0.3f" secs) "\\."))
          (sec (string-to-number (car sec-with-ms)))
          (ms (nth 1 sec-with-ms)))
@@ -163,8 +207,8 @@ group 4: description tag")
 (defun org-media-note--millisecs-to-timestamp (millisecs)
   "Convert MILLISECS to timestamp."
   (let ((millisecs (if (stringp millisecs)
-                     (string-to-number millisecs)
-                   millisecs)))
+                       (string-to-number millisecs)
+                     millisecs)))
     (org-media-note--seconds-to-timestamp (/ millisecs 1000.0))))
 
 (defun org-media-note--get-duration-timestamp ()
@@ -173,21 +217,26 @@ group 4: description tag")
 
 (defun org-media-note--get-current-timestamp ()
   "Get current media timestamp according to `org-media-note-timestamp-pattern'."
-  (org-media-note--seconds-to-timestamp (mpv-get-playback-position)))
+  (let ((position (mpv-get-playback-position)))
+    (if position
+        (org-media-note--seconds-to-timestamp position)
+      nil)))
 
 (defun org-media-note--timestamp-to-seconds (timestamp)
-  "Convert timestamp to seconds (string)."
+  "Convert TIMESTAMP to seconds (string)."
   (let* ((splitted-timestamp (split-string timestamp "\\(\\.\\|,\\)"))
          (hms (nth 0 splitted-timestamp))
          fff)
     (if (= (length splitted-timestamp) 2)
-      (progn
-        (setq fff (nth 1 splitted-timestamp))
-        (format "%s.%s" (org-timer-hms-to-secs hms) fff))
-    (int-to-string (org-timer-hms-to-secs hms)))))
+        (progn
+          (setq fff (nth 1 splitted-timestamp))
+          (format "%s.%s"
+                  (org-timer-hms-to-secs hms)
+                  fff))
+      (int-to-string (org-timer-hms-to-secs hms)))))
 
 (defun org-media-note--current-org-ref-key ()
-  "Return the org-ref key of current org entry."
+  "Return the `org-ref' key of current org entry."
   (org-entry-get (point) org-media-note-ref-key-field org-media-note-use-inheritance))
 
 (defun org-media-note--current-media-type ()
@@ -201,7 +250,10 @@ group 4: description tag")
   "Get media type of file at FILE-PATH."
   (let* ((file-ext (if file-path
                        (file-name-extension file-path))))
-    (org-media-note--get-media-type file-ext)))
+    (or
+     (org-media-note--get-media-type file-ext)
+     ;; if format is not known, video is better than nil
+     "video")))
 
 (defun org-media-note--get-media-type (file-ext)
   "Return media type based off of FILE-EXT."
@@ -216,8 +268,109 @@ group 4: description tag")
        org-media-note-use-refcite-first))
 
 (defun org-media-note--online-video-p (path)
-  "Return t if PATH is an HTTP URL."
-  (string-match "^http" (if (stringp path) path "")))
+  "Return t if PATH is an online video link."
+  (and path (string-match "^http" path)))
+
+(defun org-media-note--media-files-in-dir (dir)
+  "Get supported media file list in DIR.
+Return realpath instead of symlink."
+  (mapcar #'file-truename
+          (directory-files
+           dir
+           'full
+           (rx (eval (cons 'or
+                           (append org-media-note--video-types org-media-note--audio-types)))
+               eos))))
+
+;;;;;; Context
+(defun org-media-note--ref-context ()
+  "Return a list with info about the reference in org-media-note.
+This list includes the following elements:
+- use `org-ref' mode or not.
+- current reference key, if available.
+- associated media file for the current ref key, if any.
+- associated media URL for the current ref key, if any."
+  (let ((key (org-media-note--current-org-ref-key)))
+    (if (org-media-note-ref-cite-p)
+        (list t
+              key
+              (org-media-note-get-media-file-by-key key)
+              (org-media-note-get-url-by-key key))
+      (list nil nil nil nil))))
+
+(defun org-media-note--link-context ()
+  "Return a list with info about the link at point.
+This list includes the following elements:
+- link type.
+- file absolute path or URL path.
+- start time if available."
+  (let ((element (org-element-context)))
+    (if (eq (org-element-type element) 'link)
+        (let* ((link-type (org-element-property :type element))
+               (supported-link (member link-type '("file" "http" "https" "attachment" "audio"
+                                                   "video" "audiocite" "videocite"))))
+          (if supported-link
+              (let* ((link-path (org-element-property :path element))
+                     (path-with-type (format "%s:%s" link-type link-path))
+                     (file-path-or-url (cond
+                                        ((string= link-type "file")
+                                         (expand-file-name link-path))
+                                        ((string= link-type "attachment")
+                                         (expand-file-name link-path
+                                                           (org-attach-dir)))
+                                        ((member link-type '("audio" "video"))
+                                         (let ((media-path (nth 0
+                                                                (split-string link-path "#"))))
+                                           (if (org-media-note--online-video-p media-path)
+                                               media-path
+                                             (expand-file-name media-path))))
+                                        ((member link-type '("audiocite" "videocite"))
+                                         (let ((key (nth 0
+                                                         (split-string link-path "#"))))
+                                           (or (org-media-note-get-media-file-by-key key)
+                                               (org-media-note-get-url-by-key key))))
+                                        ((org-media-note--online-video-p path-with-type) path-with-type)
+                                        (t nil)))
+                     (start-time (if (member link-type '("audio" "video" "audiocite" "videocite"))
+                                     (let* ((timestamps (nth 1
+                                                             (split-string link-path "#")))
+                                            (time-a (nth 0
+                                                         (split-string timestamps "-"))))
+                                       (org-media-note--timestamp-to-seconds time-a))
+                                   0)))
+                (list link-type file-path-or-url start-time))
+            (list nil nil 0)))
+      (list nil nil 0))))
+
+(defun org-media-note--attach-context ()
+  "Return a list with info about the attachments.
+This list includes the following elements:
+- current attach-dir
+- media files in attach-dir."
+  (let ((attach-dir (org-attach-dir)))
+    (if attach-dir
+        (let ((media-files (org-media-note--media-files-in-dir attach-dir)))
+          (list (format "%s/" attach-dir) ;; to open correct dir in `read-file-name'
+                media-files))
+      (list nil nil))))
+
+(defun org-media-note--current-media-info ()
+  "Return a list with current playing media information.
+This list includes the following elements:
+- Media file path
+- Media file name
+- Timestamp"
+  (let* ((path (mpv-get-property "path"))
+         (name (if (org-media-note-ref-cite-p)
+                   (let* ((ref-key (org-media-note--current-org-ref-key))
+                          (bib-entry (bibtex-completion-get-entry ref-key))
+                          (title (bibtex-completion-get-value "title" bib-entry)))
+                     title)
+                 (if (org-media-note--online-video-p path)
+                     (mpv-get-property "media-title")
+                   nil)))
+         (timestamp (org-media-note--get-current-timestamp)))
+    (list path name timestamp)))
 
 ;;;;; Add note
 ;;;;;; media note item
@@ -324,7 +477,8 @@ occurrences of %-escaped PLACEHOLDER with replacement and return a new string.
            finally return string))
 
 (defun org-media-note--beginning-of-line-advice (orig-func &optional n)
-  "Advice to optimize line beginning detection in plain-lists for `org-beginning-of-line'."
+  "Advice to optimize line beginning detection in plain-lists.
+- ORIG-FUNC: `org-beginning-of-line'."
   (let ((org-list-full-item-re org-media-note--list-full-item-re))
     (funcall orig-func n)))
 
@@ -379,7 +533,7 @@ Pass ARGS to ORIG-FN, `org-insert-item'."
      ;; In a list of another type, don't break anything: throw an error.
      (t (error (concat "No playing media file now. Please open the media file"
                        "first if you want to insert media note,"
-                       "\nor turn off "))))))
+                       "\nor maybe you want to turn off <Auto insert media item>."))))))
 
 (defun org-media-note-merge-item ()
   "Join multiple lines of item into a single line."
@@ -403,46 +557,61 @@ Pass ARGS to ORIG-FN, `org-insert-item'."
 (defun org-media-note-insert-screenshot ()
   "Insert current mpv screenshot into Org-mode note."
   (interactive)
-  (let* ((image-file-name
-          (concat
-           (org-media-note--format-picture-file-name
-            (concat (file-name-base (mpv-get-property "path"))
-                    "-"
-                    (org-media-note--get-current-timestamp)))
-           ".jpg")) ;; TODO let user customize this
-         (image-target-path (cond
-                             ((eq org-media-note-screenshot-save-method
-                                  'attach)
-                              (expand-file-name image-file-name
-                                                (org-attach-dir t)))
-                             ((eq org-media-note-screenshot-save-method
-                                  'directory)
-                              (if (not (f-exists? org-media-note-screenshot-image-dir))
-                                  (make-directory org-media-note-screenshot-image-dir))
-                              (expand-file-name image-file-name org-media-note-screenshot-image-dir)))))
-    (if org-media-note-screenshot-with-sub
-        (mpv-run-command "screenshot-to-file" image-target-path)
-      (mpv-run-command "screenshot-to-file" image-target-path "video"))
-    (if (and (eq org-media-note-screenshot-save-method
-                 'attach)
-             (eq org-media-note-screenshot-link-type-when-save-in-attach-dir
-                 'attach))
-        (insert (format "[[attachment:%s]]"
-                        (file-relative-name image-target-path
-                                            (org-attach-dir))))
-      (insert (format "[[file:%s]]"
-                      (org-media-note--format-file-path image-target-path))))
-    ;; disable this code to speed up inserting screenshot.
-    ;; (org-media-note--display-inline-images)
-    ))
+  (cl-multiple-value-bind (media-path media-title current-timestamp)
+      (org-media-note--current-media-info)
+    (let* ((image-file-name (funcall org-media-note--screenshot-name-format-function
+                                     media-path media-title current-timestamp org-media-note-screenshot-extension))
+           (image-target-path (cond
+                               ((eq org-media-note-screenshot-save-method
+                                    'attach)
+                                (expand-file-name image-file-name
+                                                  (org-attach-dir t)))
+                               ((eq org-media-note-screenshot-save-method
+                                    'directory)
+                                (if (not (f-exists? org-media-note-screenshot-image-dir))
+                                    (make-directory org-media-note-screenshot-image-dir))
+                                (expand-file-name image-file-name org-media-note-screenshot-image-dir))
+                               ((fboundp org-media-note-screenshot-save-method)
+                                (expand-file-name image-file-name
+                                                  (funcall org-media-note-screenshot-save-method
+                                                           media-path media-title))))))
+      (if org-media-note-screenshot-with-sub
+          (mpv-run-command "screenshot-to-file" image-target-path)
+        (mpv-run-command "screenshot-to-file" image-target-path
+                         "video"))
+      (if (and (eq org-media-note-screenshot-save-method
+                   'attach)
+               (eq org-media-note-screenshot-link-type-when-save-in-attach-dir
+                   'attach))
+          (insert (format "[[attachment:%s]] "
+                          (file-relative-name image-target-path
+                                              (org-attach-dir))))
+        (insert (format "[[file:%s]] "
+                        (org-media-note--format-file-path image-target-path))))
+      ;; disable this code to speed up inserting screenshot.
+      ;; (org-media-note--display-inline-images)
+      )))
 
-(defun org-media-note--format-picture-file-name (name)
-  "Format picture file NAME."
-  (let (new-name)
-    (setq new-name (replace-regexp-in-string " - " "-" name))
-    (setq new-name (replace-regexp-in-string ":" "_" new-name))
-    (setq new-name (replace-regexp-in-string "\\." "_" new-name))
-    (replace-regexp-in-string " " "_" new-name)))
+(defun org-media-note--screenshot-name-format-function-default (media-path title timestamp extension)
+  "Default function to format picture file name.
+- MEDIA-PATH: file path or url.
+- TITLE: for online media and cite media only.
+- TIMESTAMP: e.g. '3:43:12'.
+- EXTENSION: default `org-media-note-screenshot-extension'."
+  (let* ((formatted-name (concat (or title
+                                     (file-name-base media-path))
+                                 "-"
+                                 timestamp))
+         (replacements '((" - " "-")
+                         ("[\]\[\/：:*?\"<>|+=,\\ ]" "_")
+                         ("_+" "_")))
+         (final-name (cl-reduce (lambda (name pair)
+                                  (replace-regexp-in-string (nth 0 pair)
+                                                            (nth 1 pair)
+                                                            name))
+                                replacements
+                                :initial-value formatted-name)))
+    (concat final-name extension)))
 
 (defun org-media-note--format-file-path (path)
   "Convert PATH into the format defined by `org-link-file-path-type'."
@@ -528,36 +697,33 @@ Pass ARGS to ORIG-FN, `org-insert-item'."
 ;;;;; Adjust timestamp
 
 (defun org-media-note-adjust-timestamp-offset ()
-  "Adjust timestamp offset."
+  "Adjust all timestamps within the current heading.
+Aligns them to the current playing position in mpv."
   (interactive)
-  (let* ((current-playing-position (mpv-get-playback-position)) link
-         current-link-position
-         offset)
-    (cl-multiple-value-bind (_ _ link _)
-        ;; void function `org-link-edit--link-data' which is from file
-        ;; contrib/lisp/org-link-edit.el. But it's deleted from org-mode commit
-        ;; "2b00d6281".
-        (if (fboundp 'org-link-edit--link-data)
-            (org-link-edit--link-data)
-          (user-error "Function `org-link-edit--link-data' is not void."))
-      (let* ((splitted (split-string link "#"))
-             (timestamps (split-string (nth 1 splitted))))
-        (setq current-link-position (org-timer-hms-to-secs (nth 0 timestamps)))
-        (setq offset (- current-playing-position current-link-position))))
-    (save-excursion
-      (org-narrow-to-subtree)
-      (goto-char (point-min))
-      (while (re-search-forward org-media-note--hms-timestamp-pattern
-                                nil t)
-        (let* ((beg (match-beginning 1))
-               (end (match-end 1))
-               (hms (buffer-substring beg end))
-               (adjusted-hms (org-media-note--seconds-to-hms (+ (org-timer-hms-to-secs hms)
-                                                                offset))))
-          (goto-char beg)
-          (delete-region beg end)
-          (insert adjusted-hms)))
-      (widen))))
+  (let ((current-playing-position (mpv-get-playback-position))
+        (link (org-element-property :raw-link (org-element-context))))
+    (unless current-playing-position
+      (error "Please use this function while mpv is playing"))
+    (unless link
+      (error "Please place the cursor on a media-link"))
+    (let* ((splitted (split-string link "#"))
+           (timestamps (split-string (nth 1 splitted)))
+           (current-link-position (org-timer-hms-to-secs (nth 0 timestamps)))
+           (offset (- current-playing-position current-link-position)))
+      (save-excursion
+        (org-narrow-to-subtree)
+        (goto-char (point-min))
+        (while (re-search-forward org-media-note--hms-timestamp-pattern
+                                  nil t)
+          (let* ((beg (match-beginning 1))
+                 (end (match-end 1))
+                 (hms (buffer-substring beg end))
+                 (adjusted-hms (org-media-note--seconds-to-hms (+ (org-timer-hms-to-secs hms)
+                                                                  offset))))
+            (goto-char beg)
+            (delete-region beg end)
+            (insert adjusted-hms)))
+        (widen)))))
 
 ;;;;; Jump to the right position
 (defun org-media-note-media-link-follow (link)
@@ -576,12 +742,16 @@ Supported formats:
                      (org-media-note--timestamp-to-seconds (nth 1 timestamps)))))
     (org-media-note--follow-link file-path-or-url time-a time-b)))
 
-(defun org-media-note--follow-link (file-path-or-url time-a time-b)
+(defun org-media-note--follow-link (file-path-or-url time-a &optional time-b)
   "Open FILE-PATH-OR-URL in mpv.
 TIME-A and TIME-B indicate the start and end of a playback loop."
   (let ((path (if (org-media-note--online-video-p file-path-or-url)
-                  file-path-or-url
-                (expand-file-name file-path-or-url))))
+                  (if (executable-find "yt-dlp")
+                      file-path-or-url
+                    (error "Warning: mpv needs the yt-dlp to play online videos"))
+                (expand-file-name file-path-or-url)))
+        (time-a (if (numberp time-a) (number-to-string time-a) time-a))
+        (time-b (if (numberp time-b) (number-to-string time-b) time-b)))
     (if (not (string= path
                       (mpv-get-property "path")))
         ;; file-path is not playing
