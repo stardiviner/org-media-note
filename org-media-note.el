@@ -84,8 +84,8 @@
              (format "Set B of A-B loop (%s - )"
                      (org-media-note--seconds-to-timestamp time-a))
            "Set A of A-B loop")))
-     :width 25)
-    ("g" org-media-note-goto-timestamp "Jump to the timestamp")
+     :width 33)
+    ("g" org-media-note-goto-timestamp "Jump to timestamp")
     ("<left>" mpv-seek-backward "Backward 5s")
     ("<right>" mpv-seek-forward "Forward 5s")
     ("<S-left>" mpv-seek-backward-small "Backward 0.5s")
@@ -135,15 +135,15 @@
     ("n" org-return-indent "Insert Org newline"))
    "Import"
    (("I p" org-media-note-insert-note-from-pbf
-     "Import from pbf")
+     "from pbf")
     ("I n" org-media-note-insert-note-from-noted
-     "Import from Noted")
+     "from Noted")
     ("I t" org-media-note-convert-from-org-timer
-     "Import from org-timer")
+     "from org-timer")
     ("I s" org-media-note-insert-note-from-subtitle
-     "Import from subtitle")
+     "from subtitle")
     ("I c" org-media-note-insert-note-from-chapter-list
-     "Import from chapters"))
+     "from chapters"))
    "Toggle"
    (("t m" toggle-org-media-note-auto-insert-item
      "Auto insert media item" :toggle org-media-note-auto-insert-item)
